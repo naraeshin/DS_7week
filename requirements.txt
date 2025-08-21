@@ -1,6 +1,3 @@
-io
-math
-numpy
 pandas
-streamlit
-matplotlib
+plotly
+kaleido
