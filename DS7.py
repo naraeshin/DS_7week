@@ -1,146 +1,106 @@
-import argparse
+import io
 import os
-import sys
 import pandas as pd
+import streamlit as st
 import plotly.graph_objects as go
-import plotly.express as px
 
-# ------------------------------------------------------------
-# 설정
-# ------------------------------------------------------------
-APP_TITLE = "채널별 주요 손익 비율 (매출원가율 / 매출총이익률 / 운영비용률)"
-OUTPUT_HTML = "channel_profitability_ratios.html"
-OUTPUT_PNG = "channel_profitability_ratios.png"
-OUTPUT_CSV = "channel_ratio_summary.csv"
+# ----------------------------
+# 페이지 설정
+# ----------------------------
+st.set_page_config(
+    page_title="채널별 손익 비율 대시보드",
+    page_icon="📊",
+    layout="wide",
+)
 
-# Plotly 폰트 설정: 맑은 고딕 우선, 미설치 환경을 대비해 대체 폰트 지정
+TITLE = "채널별 주요 손익 비율 (매출원가율 / 매출총이익률 / 운영비용률)"
 FONT_FAMILY = "Malgun Gothic, 맑은 고딕, AppleGothic, Noto Sans CJK KR, Noto Sans KR, Arial"
-
-# ------------------------------------------------------------
-# 유틸: 파일 선택(선택형)
-# ------------------------------------------------------------
-def pick_file_dialog():
-    try:
-        import tkinter as tk
-        from tkinter import filedialog
-        root = tk.Tk()
-        root.withdraw()
-        path = filedialog.askopenfilename(
-            title="KPI CSV 파일을 선택하세요",
-            filetypes=[("CSV files", "*.csv"), ("All files", "*.*")]
-        )
-        return path
-    except Exception:
-        return None
-
-# ------------------------------------------------------------
-# 데이터 로드
-# ------------------------------------------------------------
-def load_data(csv_path: str) -> pd.DataFrame:
-    if not os.path.exists(csv_path):
-        raise FileNotFoundError(f"파일을 찾을 수 없습니다: {csv_path}")
-    df = pd.read_csv(csv_path, encoding="utf-8")
-    return df
-
-# ------------------------------------------------------------
-# 검증
-# ------------------------------------------------------------
 REQUIRED_COLS = ["채널", "매출액", "매출원가", "매출총이익", "운영비용"]
+
+# ----------------------------
+# 사이드바 - 파일 업로드
+# ----------------------------
+st.sidebar.header("📥 데이터 업로드")
+uploaded_file = st.sidebar.file_uploader("CSV 파일을 업로드하세요", type=["csv"])
+
+st.title("📊 채널별 손익 비율 대시보드")
+st.caption("업로드한 CSV에서 채널별 매출원가율/매출총이익률/운영비용률을 계산하고 시각화합니다.")
 
 def validate_columns(df: pd.DataFrame):
     missing = [c for c in REQUIRED_COLS if c not in df.columns]
     if missing:
-        raise ValueError(f"필수 컬럼 누락: {missing}\n"
-                         f"필요 컬럼: {REQUIRED_COLS}")
+        st.error(f"필수 컬럼 누락: {missing}\n필요 컬럼: {REQUIRED_COLS}")
+        st.stop()
 
-# ------------------------------------------------------------
-# 계산
-# ------------------------------------------------------------
+@st.cache_data(show_spinner=False)
+def load_df(file) -> pd.DataFrame:
+    return pd.read_csv(file)
+
 def compute_channel_ratios(df: pd.DataFrame) -> pd.DataFrame:
     # 채널별 합계
     grouped = df.groupby("채널", dropna=False).agg({
         "매출액": "sum",
         "매출원가": "sum",
         "매출총이익": "sum",
-        "운영비용": "sum"
+        "운영비용": "sum",
     }).reset_index()
 
-    # 0 매출 안전 처리(0이면 분모를 매우 작은 값으로)
+    # 분모 0 보호
     safe_sales = grouped["매출액"].replace(0, 1e-12)
 
-    grouped["매출원가율"] = grouped["매출원가"] / safe_sales
+    grouped["매출원가율"]   = grouped["매출원가"]   / safe_sales
     grouped["매출총이익률"] = grouped["매출총이익"] / safe_sales
-    grouped["운영비용률"] = grouped["운영비용"] / safe_sales
+    grouped["운영비용률"]   = grouped["운영비용"]   / safe_sales
 
-    # 보기 좋게 정렬(매출액 기준 내림차순)
+    # 보기 좋게 정렬 (매출액 내림차순)
     grouped = grouped.sort_values("매출액", ascending=False).reset_index(drop=True)
-
     return grouped
 
-# ------------------------------------------------------------
-# 시각화 (Plotly)
-# ------------------------------------------------------------
-def build_chart(df_ratio: pd.DataFrame):
+def build_chart(df_ratio: pd.DataFrame) -> go.Figure:
     categories = df_ratio["채널"].astype(str).tolist()
-
     cost_ratio = df_ratio["매출원가율"].tolist()
     gross_ratio = df_ratio["매출총이익률"].tolist()
-    op_ratio = df_ratio["운영비용률"].tolist()
+    op_ratio    = df_ratio["운영비용률"].tolist()
 
-    # 운영비용률 최대 채널 하이라이트(빨간색)
+    # 운영비용률 최대 채널 붉은색 처리 + 값 라벨
     max_idx = int(pd.Series(op_ratio).idxmax())
-    colors_op = []
-    for i, _ in enumerate(op_ratio):
-        colors_op.append("red" if i == max_idx else "#636EFA")  # Plotly 기본 팔레트 중 파랑 대체
+    colors_op = ["#636EFA"] * len(op_ratio)  # 기본색
+    colors_op[max_idx] = "red"
 
-    # 평균선
     op_avg = float(pd.Series(op_ratio).mean())
 
     fig = go.Figure()
 
-    # 매출원가율
     fig.add_trace(go.Bar(
         name="매출원가율",
-        x=categories,
-        y=cost_ratio,
-        offsetgroup=0,
-        marker=dict(line=dict(width=0)),
+        x=categories, y=cost_ratio, offsetgroup=0,
         hovertemplate="채널=%{x}<br>매출원가율=%{y:.2f}<extra></extra>"
     ))
 
-    # 매출총이익률
     fig.add_trace(go.Bar(
         name="매출총이익률",
-        x=categories,
-        y=gross_ratio,
-        offsetgroup=1,
-        marker=dict(line=dict(width=0)),
+        x=categories, y=gross_ratio, offsetgroup=1,
         hovertemplate="채널=%{x}<br>매출총이익률=%{y:.2f}<extra></extra>"
     ))
 
-    # 운영비용률 (최대값 붉은색 + 레이블)
-    # text는 최대값에만 표시
-    text_vals = ["" for _ in op_ratio]
+    text_vals = [""] * len(op_ratio)
     text_vals[max_idx] = f"{op_ratio[max_idx]:.2f}"
 
     fig.add_trace(go.Bar(
         name="운영비용률",
-        x=categories,
-        y=op_ratio,
-        offsetgroup=2,
+        x=categories, y=op_ratio, offsetgroup=2,
         marker=dict(color=colors_op),
-        text=text_vals,
-        textposition="outside",
-        cliponaxis=False,
+        text=text_vals, textposition="outside", cliponaxis=False,
         hovertemplate="채널=%{x}<br>운영비용률=%{y:.2f}<extra></extra>"
     ))
 
     # 평균선
-    fig.add_hline(y=op_avg, line_dash="dash", line_color="gray", annotation_text=f"운영비용률 평균: {op_avg:.2f}")
+    fig.add_hline(y=op_avg, line_dash="dash", line_color="gray",
+                  annotation_text=f"운영비용률 평균: {op_avg:.2f}",
+                  annotation_position="top left")
 
-    # 레이아웃
     fig.update_layout(
-        title=dict(text=APP_TITLE, x=0.5),
+        title=dict(text=TITLE, x=0.5),
         xaxis_title="채널",
         yaxis_title="비율",
         barmode="group",
@@ -149,65 +109,79 @@ def build_chart(df_ratio: pd.DataFrame):
         legend_title_text="지표",
         template="plotly_white",
         font=dict(family=FONT_FAMILY),
-        margin=dict(l=60, r=40, t=80, b=60),
-        hoverlabel=dict(font_family=FONT_FAMILY)
+        margin=dict(l=40, r=40, t=80, b=40),
     )
-
-    # y=0 기준선 강조
     fig.add_hline(y=0, line_width=1, line_color="black")
-
     return fig
 
-# ------------------------------------------------------------
-# 저장
-# ------------------------------------------------------------
-def save_outputs(fig: go.Figure, df_ratio: pd.DataFrame):
-    # HTML(인터랙티브)
-    fig.write_html(OUTPUT_HTML, include_plotlyjs="cdn")
-    # PNG(정적) - kaleido 필요
-    try:
-        fig.write_image(OUTPUT_PNG, scale=2, width=1200, height=700)
-    except Exception as e:
-        print(f"[경고] PNG 저장 실패(아마도 kaleido 미설치/폰트문제): {e}")
-    # 요약 테이블 CSV
-    # 소수점 6자리 고정(원하면 변경)
-    df_export = df_ratio.copy()
-    for col in ["매출원가율", "매출총이익률", "운영비용률"]:
-        df_export[col] = df_export[col].round(6)
-    df_export.to_csv(OUTPUT_CSV, index=False, encoding="utf-8-sig")
+def format_ratio_columns(df: pd.DataFrame, pct_cols):
+    out = df.copy()
+    for c in pct_cols:
+        out[c] = (out[c] * 100).map(lambda x: f"{x:,.2f}%")
+    return out
 
-# ------------------------------------------------------------
-# 메인
-# ------------------------------------------------------------
-def main():
-    parser = argparse.ArgumentParser(description="채널별 손익 비율 자동화 스크립트")
-    parser.add_argument("--file", type=str, help="입력 CSV 파일 경로 (예: KPI_Master_Small_12M_KR.csv)")
-    args = parser.parse_args()
-
-    csv_path = args.file
-    if not csv_path:
-        csv_path = pick_file_dialog()
-    if not csv_path:
-        print("CSV 파일이 선택되지 않았습니다. --file 옵션으로 경로를 지정하거나 파일 선택창에서 선택하세요.")
-        sys.exit(1)
-
-    print(f"[정보] 파일 로드: {csv_path}")
-    df = load_data(csv_path)
+# ----------------------------
+# 본문 UI
+# ----------------------------
+if uploaded_file is None:
+    st.info("좌측 사이드바에서 CSV 파일을 업로드해주세요. (예: KPI_Master_Small_12M_KR.csv)")
+else:
+    df = load_df(uploaded_file)
     validate_columns(df)
 
-    print("[정보] 채널별 비율 계산 중...")
-    df_ratio = compute_channel_ratios(df)
+    # 계산
+    ratio_df = compute_channel_ratios(df)
 
-    print("[정보] 차트 생성 중...")
-    fig = build_chart(df_ratio)
+    # 결과 테이블
+    with st.expander("채널별 손익 비율 요약 데이터", expanded=True):
+        st.dataframe(
+            format_ratio_columns(
+                ratio_df[["채널", "매출원가율", "매출총이익률", "운영비용률"]],
+                ["매출원가율", "매출총이익률", "운영비용률"]
+            ),
+            use_container_width=True
+        )
 
-    print(f"[정보] 결과 저장: {OUTPUT_HTML}, {OUTPUT_PNG}, {OUTPUT_CSV}")
-    save_outputs(fig, df_ratio)
+    # 차트
+    fig = build_chart(ratio_df)
+    st.plotly_chart(fig, use_container_width=True)
 
-    print("[완료] 생성된 파일을 확인하세요:")
-    print(f" - {os.path.abspath(OUTPUT_HTML)}")
-    print(f" - {os.path.abspath(OUTPUT_PNG)}")
-    print(f" - {os.path.abspath(OUTPUT_CSV)}")
+    # ----------------------------
+    # 다운로드 섹션
+    # ----------------------------
+    st.subheader("⬇️ 결과 다운로드")
 
-if __name__ == "__main__":
-    main()
+    # CSV
+    csv_bytes = ratio_df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+    st.download_button(
+        label="채널별 비율 CSV 다운로드",
+        data=csv_bytes,
+        file_name="channel_ratio_summary.csv",
+        mime="text/csv"
+    )
+
+    # HTML
+    html_bytes = fig.to_html(include_plotlyjs="cdn").encode("utf-8")
+    st.download_button(
+        label="차트 HTML 다운로드",
+        data=html_bytes,
+        file_name="channel_profitability_ratios.html",
+        mime="text/html"
+    )
+
+    # PNG (kaleido 필요)
+    try:
+        png_bytes = fig.to_image(format="png", width=1400, height=800, scale=2)
+        st.download_button(
+            label="차트 PNG 다운로드",
+            data=png_bytes,
+            file_name="channel_profitability_ratios.png",
+            mime="image/png"
+        )
+    except Exception as e:
+        st.warning("PNG 생성에 실패했습니다. 서버에 'kaleido'가 설치되어 있는지 확인하세요.")
+        if os.environ.get("STREAMLIT_DEBUG", "0") == "1":
+            st.exception(e)
+
+# 푸터
+st.caption("© 채널별 손익 비율 대시보드 • Plotly + Streamlit • 폰트: 맑은 고딕 우선 적용")
